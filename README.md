@@ -1,12 +1,11 @@
 # pester
 
 `pester` wraps Go's standard lib http client to provide several options to increase resiliency in your request. If you experience poor network conditions or requests could experience varied delays, you can now pester the endpoint for data.
-- Send out multiple requests and get the first back (only used for GET calls)
 - Retry on errors
 - Backoff
 
 ### Simple Example
-Use `pester` where you would use the http client calls. By default, pester will use a concurrency of 1, and retry the endpoint 3 times with the `DefaultBackoff` strategy of waiting 1 second between retries.
+Use `pester` where you would use the http client calls. By default, pester will retry the endpoint 3 times with the `DefaultBackoff` strategy of waiting 1 second between retries.
 ```go
 /* swap in replacement, just switch
    http.{Get|Post|PostForm|Head|Do} to
@@ -36,7 +35,6 @@ For a complete and working example, see the sample directory.
 `pester` allows you to use a constructor to control:
 - backoff strategy
 - retries
-- concurrency
 - keeping a log for debugging
 ```go
 package main
@@ -63,7 +61,6 @@ func main() {
 
     { // control the resiliency
         client := pester.New()
-        client.Concurrency = 3
         client.MaxRetries = 5
         client.Backoff = pester.ExponentialBackoff
         client.KeepLog = true
@@ -105,9 +102,9 @@ fmt.Println(c.LogString())
 /*
 Output:
 
-1432402837 Get [GET] http://localhost:9000/foo request-0 retry-0 error: Get http://localhost:9000/foo: dial tcp 127.0.0.1:9000: connection refused
-1432402838 Get [GET] http://localhost:9000/foo request-0 retry-1 error: Get http://localhost:9000/foo: dial tcp 127.0.0.1:9000: connection refused
-1432402839 Get [GET] http://localhost:9000/foo request-0 retry-2 error: Get http://localhost:9000/foo: dial tcp 127.0.0.1:9000: connection refused
+1432402837 Get [GET] http://localhost:9000/foo attempt-1 error: Get http://localhost:9000/foo: dial tcp 127.0.0.1:9000: connection refused
+1432402838 Get [GET] http://localhost:9000/foo attempt-2 error: Get http://localhost:9000/foo: dial tcp 127.0.0.1:9000: connection refused
+1432402839 Get [GET] http://localhost:9000/foo attempt-3 error: Get http://localhost:9000/foo: dial tcp 127.0.0.1:9000: connection refused
 */
 ```
 

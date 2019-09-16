@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sethgrid/pester"
+	"github.com/BoseCorp/pester"
 )
 
 func init() {
@@ -45,24 +45,43 @@ func main() {
 	// begin running through each of the pestor methods //
 	//////////////////////////////////////////////////////
 
+	log.Println("> pester Do with POST and retry header")
+	{ // use the pester version of http.Client.Do
+		client := pester.New()
+		client.Timeout = 1 * time.Second
+		client.MaxRetries = 3
+		client.RetryAttemptHeader = "X-Retry-Attempt"
+
+		req, err := http.NewRequest("POST", fmt.Sprintf("http://localhost:%d", port), strings.NewReader("data"))
+		if err != nil {
+			log.Fatal("Unable to create a new http request", err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Fatalf("error POSTing with Do() - %v\n\n", err)
+		}
+		defer resp.Body.Close()
+
+		log.Printf("Do() POST :%d %s\n\n", port, resp.Status)
+	}
+
 	log.Println("> pester.Get default")
 	{ // drop in replacement for http.Get and other client methods
 		resp, err := pester.Get(fmt.Sprintf("http://localhost:%d", port))
 		if err != nil {
-			log.Fatalf("error GETing default", err)
+			log.Fatalf("error GETing default: %s", err)
 		}
 		defer resp.Body.Close()
 
 		log.Printf("GET :%d %s \n\n", port, resp.Status)
 	}
 
-	log.Println("> pester.Get with set backoff stategy, concurrency and retries increased")
 	{ // control the resiliency
 		client := pester.New()
-		client.Concurrency = 3
 		client.MaxRetries = 5
 		client.Backoff = pester.ExponentialJitterBackoff
 		client.KeepLog = true
+		client.RetryAttemptHeader = "X-Retry-Attempt"
 
 		resp, err := client.Get(fmt.Sprintf("http://localhost:%d", port))
 		if err != nil {
@@ -70,7 +89,7 @@ func main() {
 		}
 		defer resp.Body.Close()
 
-		log.Printf("Exponential Jitter Backoff :%d %s [request %d, retry %d]\n\n", port, resp.Status, client.SuccessReqNum, client.SuccessRetryNum)
+		log.Printf("Exponential Jitter Backoff :%d %s\n\n", port, resp.Status)
 	}
 
 	log.Println("> pester.Get with custom backoff strategy")
@@ -84,11 +103,11 @@ func main() {
 
 		resp, err := client.Get(fmt.Sprintf("http://localhost:%d", port))
 		if err != nil {
-			log.Fatalf("error GETing custom backoff\n\n", client.LogString())
+			log.Fatalf("error GETing custom backoff: %s\n\n", client.LogString())
 		}
 		defer resp.Body.Close()
 
-		log.Printf("Custom backoff :%d %s [request %d, retry %d]\n\n", port, resp.Status, client.SuccessReqNum, client.SuccessRetryNum)
+		log.Printf("Custom backoff :%d %s\n\n", port, resp.Status)
 	}
 
 	log.Println("> pester.Post with defaults")

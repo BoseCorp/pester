@@ -8,317 +8,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
-	"os"
-	"runtime"
-	"runtime/debug"
-	"runtime/pprof"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
-
-func TestConcurrentRequests(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 3
-	c.KeepLog = true
-
-	nonExistantURL := "http://localhost:9000/foo"
-
-	_, err := c.Get(nonExistantURL)
-	if err == nil {
-		t.Fatal("expected to get an error")
-	}
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), c.Concurrency*c.MaxRetries; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
-
-func TestConcurrentRequestsWith429DefaultClient(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 3
-	c.KeepLog = true
-
-	port, err := serverWith429()
-	if err != nil {
-		t.Fatal("unable to start server", err)
-	}
-
-	url := fmt.Sprintf("http://localhost:%d", port)
-
-	response, err := c.Get(url)
-	if err != nil {
-		t.Fatal("unable to GET", err)
-	}
-	c.Wait()
-
-	response.Body.Close()
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), 0; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
-
-func TestConcurrentRequestsWith400(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 3
-	c.KeepLog = true
-	c.SetRetryOnHTTP429(true)
-
-	port, err := serverWith400()
-	if err != nil {
-		t.Fatal("unable to start server", err)
-	}
-
-	url := fmt.Sprintf("http://localhost:%d", port)
-
-	response, err := c.Get(url)
-	if err != nil {
-		t.Fatal("unable to GET", err)
-	}
-	c.Wait()
-
-	response.Body.Close()
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), 0; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
-
-func TestConcurrentRequestsWith429(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 3
-	c.KeepLog = true
-	c.SetRetryOnHTTP429(true)
-
-	port, err := serverWith429()
-	if err != nil {
-		t.Fatal("unable to start server", err)
-	}
-
-	url := fmt.Sprintf("http://localhost:%d", port)
-
-	response, err := c.Get(url)
-	if err != nil {
-		t.Fatal("unable to GET", err)
-	}
-	c.Wait()
-
-	response.Body.Close()
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), c.Concurrency*c.MaxRetries; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
-
-func TestMaxRetriesConcurrentRequestsWith429DefaultClient(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 3
-	c.KeepLog = true
-	c.MaxRetries = 5
-
-	port, err := serverWith429()
-	if err != nil {
-		t.Fatal("unable to start server", err)
-	}
-
-	url := fmt.Sprintf("http://localhost:%d", port)
-
-	response, err := c.Get(url)
-	if err != nil {
-		t.Fatal("unable to GET", err)
-	}
-	c.Wait()
-
-	response.Body.Close()
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), 0; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
-
-func TestMaxRetriesConcurrentRequestsWith400(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 3
-	c.KeepLog = true
-	c.MaxRetries = 5
-	c.SetRetryOnHTTP429(true)
-
-	port, err := serverWith400()
-	if err != nil {
-		t.Fatal("unable to start server", err)
-	}
-
-	url := fmt.Sprintf("http://localhost:%d", port)
-
-	response, err := c.Get(url)
-	if err != nil {
-		t.Fatal("unable to GET", err)
-	}
-	c.Wait()
-
-	response.Body.Close()
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), 0; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
-
-func TestMaxRetriesConcurrentRequestsWith429(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 3
-	c.KeepLog = true
-	c.MaxRetries = 5
-	c.SetRetryOnHTTP429(true)
-
-	port, err := serverWith429()
-	if err != nil {
-		t.Fatal("unable to start server", err)
-	}
-
-	url := fmt.Sprintf("http://localhost:%d", port)
-
-	response, err := c.Get(url)
-	if err != nil {
-		t.Fatal("unable to GET", err)
-	}
-	c.Wait()
-
-	response.Body.Close()
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), c.Concurrency*c.MaxRetries; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
-
-func TestConcurrent2Retry0(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 2
-	c.MaxRetries = 0
-	c.KeepLog = true
-
-	nonExistantURL := "http://localhost:9000/foo"
-
-	_, err := c.Get(nonExistantURL)
-	if err == nil {
-		t.Fatal("expected to get an error")
-	}
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), c.Concurrency; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
-
-func TestConcurrent2Retry0for429DefaultClient(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 2
-	c.MaxRetries = 0
-	c.KeepLog = true
-
-	port, err := serverWith429()
-	if err != nil {
-		t.Fatal("unable to start server", err)
-	}
-
-	url := fmt.Sprintf("http://localhost:%d", port)
-
-	_, getErr := c.Get(url)
-
-	if getErr != nil {
-		t.Fatal("unable to GET", getErr)
-	}
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), 0; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
-
-func TestConcurrent2Retry0for429(t *testing.T) {
-	t.Parallel()
-
-	c := New()
-	c.Concurrency = 2
-	c.MaxRetries = 0
-	c.KeepLog = true
-	c.SetRetryOnHTTP429(true)
-
-	port, err := serverWith429()
-	if err != nil {
-		t.Fatal("unable to start server", err)
-	}
-
-	url := fmt.Sprintf("http://localhost:%d", port)
-
-	_, getErr := c.Get(url)
-
-	if getErr != nil {
-		t.Fatal("unable to GET", getErr)
-	}
-	c.Wait()
-
-	// in the event of an error, let's see what the logs were
-	t.Log("\n", c.LogString())
-
-	if got, want := c.LogErrCount(), c.Concurrency; got != want {
-		t.Errorf("got %d attempts, want %d", got, want)
-	}
-}
 
 func TestDefaultBackoff(t *testing.T) {
 	t.Parallel()
@@ -332,14 +26,9 @@ func TestDefaultBackoff(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected to get an error")
 	}
-	c.Wait()
 
 	// in the event of an error, let's see what the logs were
 	t.Log("\n", c.LogString())
-
-	if got, want := c.Concurrency, 1; got != want {
-		t.Errorf("got %d, want %d for concurrency", got, want)
-	}
 
 	if got, want := c.LogErrCount(), c.MaxRetries; got != want {
 		t.Fatalf("got %d errors, want %d", got, want)
@@ -361,15 +50,13 @@ func TestDefaultBackoff(t *testing.T) {
 func TestFormatError(t *testing.T) {
 	t.Parallel()
 	err := errors.New("Get http://localhost:9000/foo: dial tcp 127.0.0.1:9000: getsockopt: connection refused")
-	expected := "1491271979 Get [GET] http://localhost:9000/foo request-0 retry-2 error: " + err.Error() + "\n"
+	expected := "1491271979 Get [GET] http://localhost:9000/foo attempt-1 error: " + err.Error() + "\n"
 
 	e := ErrEntry{
 		Time:    time.Unix(1491271979, 0),
 		Method:  "Get",
 		URL:     "http://localhost:9000/foo",
 		Verb:    http.MethodGet,
-		Request: 0,
-		Retry:   2,
 		Attempt: 1,
 		Err:     err,
 	}
@@ -404,7 +91,6 @@ func TestCustomLogHook(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected to get an error")
 	}
-	c.Wait()
 
 	// in the event of an error, let's see what the logs were
 	if expectedRetries != len(errorLines) {
@@ -430,7 +116,6 @@ func TestDefaultLogHook(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected to get an error")
 	}
-	c.Wait()
 
 	// in the event of an error, let's see what the logs were
 	if errorLines != 0 {
@@ -450,7 +135,6 @@ func TestLinearJitterBackoff(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected to get an error")
 	}
-	c.Wait()
 
 	// in the event of an error, let's see what the logs were
 	t.Log("\n", c.LogString())
@@ -489,7 +173,6 @@ func TestExponentialBackoff(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected to get an error")
 	}
-	c.Wait()
 
 	// in the event of an error, let's see what the logs were
 	t.Log("\n", c.LogString())
@@ -539,7 +222,6 @@ func TestCookiesJarPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal("unable to GET", err)
 	}
-	c.Wait()
 
 	response.Body.Close()
 	if !strings.Contains(fmt.Sprintf("%v", jar), "mah-cookie nomnomnom") {
@@ -562,100 +244,6 @@ func TestEmbeddedClientTimeout(t *testing.T) {
 	_, err = c.Get(fmt.Sprintf("http://localhost:%d/", port))
 	if err == nil {
 		t.Error("expected a timeout error, did not get it")
-	}
-}
-
-func TestConcurrentRequestsNotRacyAndDontLeak_FailedRequest(t *testing.T) {
-	goroStart := runtime.NumGoroutine()
-	c := New()
-	port, closeFn, err := cookieServer()
-	if err != nil {
-		t.Fatalf("unable to start server %v", err)
-	}
-	goodURL := fmt.Sprintf("http://localhost:%d", port)
-	conc := 5
-	errCh := make(chan error, conc)
-
-	wg := &sync.WaitGroup{}
-	block := make(chan struct{})
-	for i := 0; i < conc; i++ {
-		wg.Add(1)
-		go func() {
-			<-block
-			defer wg.Done()
-			resp, err := c.Get(goodURL)
-			if err != nil {
-				errCh <- fmt.Errorf("got unexpected error getting %s, %v", goodURL, err)
-				return
-			}
-			if resp != nil {
-				resp.Body.Close()
-			}
-		}()
-	}
-	close(block)
-	go func() {
-		select {
-		case err := <-errCh:
-			t.Fatal(err)
-		case <-time.After(250 * time.Millisecond):
-			return
-		}
-	}()
-	wg.Wait()
-
-	// close the slow running cookie server so it does not look like a leaked goroutine
-	closeFn()
-	// give background goroutines time to clean up
-	time.Sleep(500 * time.Millisecond)
-	goroEnd := runtime.NumGoroutine()
-	if goroStart < goroEnd {
-		t.Errorf("got %d running goroutines, want %d", goroEnd, goroStart)
-		debug.PrintStack()
-		pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
-	}
-}
-
-func TestConcurrentRequestsNotRacyAndDontLeak_SuccessfulRequest(t *testing.T) {
-	goroStart := runtime.NumGoroutine()
-	c := New()
-	nonExistantURL := "http://localhost:9000/foo"
-	conc := 5
-	errCh := make(chan error, conc)
-
-	wg := &sync.WaitGroup{}
-	block := make(chan struct{})
-	for i := 0; i < conc; i++ {
-		wg.Add(1)
-		go func() {
-			<-block
-			defer wg.Done()
-			resp, err := c.Get(nonExistantURL)
-			if err == nil {
-				errCh <- fmt.Errorf("should have had an error getting %s", nonExistantURL)
-				return
-			}
-			if resp != nil {
-				resp.Body.Close()
-			}
-		}()
-	}
-	close(block)
-	go func() {
-		select {
-		case err := <-errCh:
-			t.Fatal(err)
-		case <-time.After(250 * time.Millisecond):
-			return
-		}
-	}()
-	wg.Wait()
-
-	// give background goroutines time to clean up
-	<-time.After(1000 * time.Millisecond)
-	goroEnd := runtime.NumGoroutine()
-	if goroStart < goroEnd {
-		t.Errorf("got %d running goroutines, want %d", goroEnd, goroStart)
 	}
 }
 
@@ -691,7 +279,6 @@ func TestRetriesNotAttemptedIfContextIsCancelled(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected to get an error")
 	}
-	c.Wait()
 
 	// in the event of an error, let's see what the logs were
 	t.Log("\n", c.LogString())

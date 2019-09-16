@@ -11,7 +11,6 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 )
 
@@ -36,18 +35,12 @@ type Client struct {
 	Timeout       time.Duration
 
 	// pester specific
-	Concurrency int
-	MaxRetries  int
-	Backoff     BackoffStrategy
-	KeepLog     bool
-	LogHook     LogHook
+	MaxRetries         int
+	Backoff            BackoffStrategy
+	KeepLog            bool
+	LogHook            LogHook
+	RetryAttemptHeader string
 
-	SuccessReqNum   int
-	SuccessRetryNum int
-
-	wg *sync.WaitGroup
-
-	sync.Mutex
 	ErrLog         []ErrEntry
 	RetryOnHTTP429 bool
 }
@@ -60,8 +53,6 @@ type ErrEntry struct {
 	Method  string
 	URL     string
 	Verb    string
-	Request int
-	Retry   int
 	Attempt int
 	Err     error
 }
@@ -94,11 +85,9 @@ func init() {
 // New constructs a new DefaultClient with sensible default values
 func New() *Client {
 	return &Client{
-		Concurrency:    DefaultClient.Concurrency,
 		MaxRetries:     DefaultClient.MaxRetries,
 		Backoff:        DefaultClient.Backoff,
 		ErrLog:         DefaultClient.ErrLog,
-		wg:             &sync.WaitGroup{},
 		RetryOnHTTP429: false,
 	}
 }
@@ -119,7 +108,7 @@ type LogHook func(e ErrEntry)
 type BackoffStrategy func(retry int) time.Duration
 
 // DefaultClient provides sensible defaults
-var DefaultClient = &Client{Concurrency: 1, MaxRetries: 3, Backoff: DefaultBackoff, ErrLog: []ErrEntry{}}
+var DefaultClient = &Client{MaxRetries: 3, Backoff: DefaultBackoff, ErrLog: []ErrEntry{}}
 
 // DefaultBackoff always returns 1 second
 func DefaultBackoff(_ int) time.Duration {
@@ -165,52 +154,14 @@ func jitter(i int) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// Wait blocks until all pester requests have returned
-// Probably not that useful outside of testing.
-func (c *Client) Wait() {
-	c.wg.Wait()
-}
-
 // pester provides all the logic of retries, concurrency, backoff, and logging
 func (c *Client) pester(p params) (*http.Response, error) {
-	resultCh := make(chan result)
-	multiplexCh := make(chan result)
-	finishCh := make(chan struct{})
-
-	// track all requests that go out so we can close the late listener routine that closes late incoming response bodies
-	totalSentRequests := &sync.WaitGroup{}
-	totalSentRequests.Add(1)
-	defer totalSentRequests.Done()
-	allRequestsBackCh := make(chan struct{})
-	go func() {
-		totalSentRequests.Wait()
-		close(allRequestsBackCh)
-	}()
-
-	// GET calls should be idempotent and can make use
-	// of concurrency. Other verbs can mutate and should not
-	// make use of the concurrency feature
-	concurrency := c.Concurrency
-	if p.verb != "GET" {
-		concurrency = 1
-	}
-
-	c.Lock()
 	if c.hc == nil {
 		c.hc = &http.Client{}
 		c.hc.Transport = c.Transport
 		c.hc.CheckRedirect = c.CheckRedirect
 		c.hc.Jar = c.Jar
 		c.hc.Timeout = c.Timeout
-	}
-	c.Unlock()
-
-	// re-create the http client so we can leverage the std lib
-	httpClient := http.Client{
-		Transport:     c.hc.Transport,
-		CheckRedirect: c.hc.CheckRedirect,
-		Jar:           c.hc.Jar,
-		Timeout:       c.hc.Timeout,
 	}
 
 	// if we have a request body, we need to save it for later
@@ -236,131 +187,81 @@ func (c *Client) pester(p params) (*http.Response, error) {
 		AttemptLimit = 1
 	}
 
-	for req := 0; req < concurrency; req++ {
-		c.wg.Add(1)
-		totalSentRequests.Add(1)
-		go func(n int, p params) {
-			defer c.wg.Done()
-			defer totalSentRequests.Done()
+	var resp *http.Response
+	for i := 1; i <= AttemptLimit; i++ {
+		// rehydrate the body (it is drained each read)
+		if len(originalRequestBody) > 0 {
+			p.req.Body = ioutil.NopCloser(bytes.NewBuffer(originalRequestBody))
+		}
+		if len(originalBody) > 0 {
+			p.body = bytes.NewBuffer(originalBody)
+		}
 
-			var err error
-			for i := 1; i <= AttemptLimit; i++ {
-				c.wg.Add(1)
-				defer c.wg.Done()
-				select {
-				case <-finishCh:
-					return
-				default:
-				}
+		// Add retry attempt header if provided for Do
+		if p.req != nil && c.RetryAttemptHeader != "" && i > 1 {
+			p.req.Header.Set(c.RetryAttemptHeader, fmt.Sprintf("%d", i-1))
+		}
 
-				// rehydrate the body (it is drained each read)
-				if len(originalRequestBody) > 0 {
-					p.req.Body = ioutil.NopCloser(bytes.NewBuffer(originalRequestBody))
-				}
-				if len(originalBody) > 0 {
-					p.body = bytes.NewBuffer(originalBody)
-				}
+		// route the calls
+		switch p.method {
+		case "Do":
+			resp, err = c.hc.Do(p.req)
+		case "Get":
+			resp, err = c.hc.Get(p.url)
+		case "Head":
+			resp, err = c.hc.Head(p.url)
+		case "Post":
+			resp, err = c.hc.Post(p.url, p.bodyType, p.body)
+		case "PostForm":
+			resp, err = c.hc.PostForm(p.url, p.data)
+		default:
+			err = ErrUnexpectedMethod
+		}
 
-				var resp *http.Response
-				// route the calls
-				switch p.method {
-				case "Do":
-					resp, err = httpClient.Do(p.req)
-				case "Get":
-					resp, err = httpClient.Get(p.url)
-				case "Head":
-					resp, err = httpClient.Head(p.url)
-				case "Post":
-					resp, err = httpClient.Post(p.url, p.bodyType, p.body)
-				case "PostForm":
-					resp, err = httpClient.PostForm(p.url, p.data)
-				default:
-					err = ErrUnexpectedMethod
-				}
+		// Early return if we have a valid result
+		// Only retry (ie, continue the loop) on 5xx status codes and 429
+		if err == nil && resp.StatusCode < 500 && (resp.StatusCode != 429 || (resp.StatusCode == 429 && !c.RetryOnHTTP429)) {
+			return resp, err
+		}
 
-				// Early return if we have a valid result
-				// Only retry (ie, continue the loop) on 5xx status codes and 429
+		c.log(ErrEntry{
+			Time:    time.Now(),
+			Method:  p.method,
+			Verb:    p.verb,
+			URL:     p.url,
+			Attempt: i,
+			Err:     err,
+		})
 
-				if err == nil && resp.StatusCode < 500 && (resp.StatusCode != 429 || (resp.StatusCode == 429 && !c.RetryOnHTTP429)) {
-					multiplexCh <- result{resp: resp, err: err, req: n, retry: i}
-					return
-				}
+		// if it is the last iteration, grab the result (which is an error at this point)
+		if i == AttemptLimit {
+			return resp, err
+		}
 
-				c.log(ErrEntry{
-					Time:    time.Now(),
-					Method:  p.method,
-					Verb:    p.verb,
-					URL:     p.url,
-					Request: n,
-					Retry:   i + 1, // would remove, but would break backward compatibility
-					Attempt: i,
-					Err:     err,
-				})
-
-				// if it is the last iteration, grab the result (which is an error at this point)
-				if i == AttemptLimit {
-					multiplexCh <- result{resp: resp, err: err}
-					return
-				}
-
-				//If the request has been cancelled, skip retries
-				if p.req != nil {
-					ctx := p.req.Context()
-					select {
-					case <-ctx.Done():
-						multiplexCh <- result{resp: resp, err: ctx.Err()}
-						return
-					default:
-					}
-				}
-
-				// if we are retrying, we should close this response body to free the fd
-				if resp != nil {
-					resp.Body.Close()
-				}
-
-				// prevent a 0 from causing the tick to block, pass additional microsecond
-				<-time.After(c.Backoff(i) + 1*time.Microsecond)
-			}
-		}(req, p)
-	}
-
-	// spin off the go routine so it can continually listen in on late results and close the response bodies
-	go func() {
-		gotFirstResult := false
-		for {
+		// if the request has been cancelled, skip retries
+		if p.req != nil {
+			ctx := p.req.Context()
 			select {
-			case res := <-multiplexCh:
-				if !gotFirstResult {
-					gotFirstResult = true
-					close(finishCh)
-					resultCh <- res
-				} else if res.resp != nil {
-					// we only return one result to the caller; close all other response bodies that come back
-					// drain the body before close as to not prevent keepalive. see https://gist.github.com/mholt/eba0f2cc96658be0f717
-					io.Copy(ioutil.Discard, res.resp.Body)
-					res.resp.Body.Close()
-				}
-			case <-allRequestsBackCh:
-				// don't leave this goroutine running
-				return
+			case <-ctx.Done():
+				return resp, ctx.Err()
+			default:
 			}
 		}
-	}()
 
-	res := <-resultCh
-	c.Lock()
-	defer c.Unlock()
-	c.SuccessReqNum = res.req
-	c.SuccessRetryNum = res.retry
-	return res.resp, res.err
+		// if we are retrying, we should close this response body to free the fd
+		if resp != nil {
+			resp.Body.Close()
+		}
 
+		// prevent a 0 from causing the tick to block, pass additional microsecond
+		<-time.After(c.Backoff(i) + 1*time.Microsecond)
+	}
+
+	return resp, err
 }
 
 // LogString provides a string representation of the errors the client has seen
 func (c *Client) LogString() string {
-	c.Lock()
-	defer c.Unlock()
 	var res string
 	for _, e := range c.ErrLog {
 		res += c.FormatError(e)
@@ -368,16 +269,14 @@ func (c *Client) LogString() string {
 	return res
 }
 
-// Format the Error to human readable string
+// FormatError formats the Error to human readable string
 func (c *Client) FormatError(e ErrEntry) string {
-	return fmt.Sprintf("%d %s [%s] %s request-%d retry-%d error: %s\n",
-		e.Time.Unix(), e.Method, e.Verb, e.URL, e.Request, e.Retry, e.Err)
+	return fmt.Sprintf("%d %s [%s] %s attempt-%d error: %s\n",
+		e.Time.Unix(), e.Method, e.Verb, e.URL, e.Attempt, e.Err)
 }
 
 // LogErrCount is a helper method used primarily for test validation
 func (c *Client) LogErrCount() int {
-	c.Lock()
-	defer c.Unlock()
 	return len(c.ErrLog)
 }
 
@@ -389,8 +288,6 @@ func (c *Client) EmbedHTTPClient(hc *http.Client) {
 
 func (c *Client) log(e ErrEntry) {
 	if c.KeepLog {
-		c.Lock()
-		defer c.Unlock()
 		c.ErrLog = append(c.ErrLog, e)
 	} else if c.LogHook != nil {
 		// NOTE: There is a possibility that Log Printing hook slows it down.
@@ -424,7 +321,7 @@ func (c *Client) PostForm(url string, data url.Values) (resp *http.Response, err
 	return c.pester(params{method: "PostForm", url: url, data: data, verb: "POST"})
 }
 
-// set RetryOnHTTP429 for clients,
+// SetRetryOnHTTP429 sets RetryOnHTTP429 for clients
 func (c *Client) SetRetryOnHTTP429(flag bool) {
 	c.RetryOnHTTP429 = flag
 }
